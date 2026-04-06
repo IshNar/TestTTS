@@ -224,7 +224,24 @@ function setKokoroStatus(state,msg){
 async function initKokoroEngine(){
   if(kokoroReady||kokoroInitializing) return kokoroReady;
   kokoroInitializing=true;
-  setKokoroStatus('loading','🔄 Kokoro AI 모델 로딩 중... (최초 1회, ~80MB 다운로드 후 캐시됨)');
+  // Check if model is already cached
+  var modelCached=false;
+  try{
+    if(window.caches){
+      var cacheNames=await caches.keys();
+      modelCached=cacheNames.some(function(n){return n.indexOf('kokoro')!==-1||n.indexOf('onnx')!==-1||n.indexOf('tts')!==-1});
+    }
+    if(!modelCached&&window.indexedDB){
+      var dbs=await indexedDB.databases();
+      modelCached=dbs.some(function(d){return d.name&&(d.name.indexOf('kokoro')!==-1||d.name.indexOf('onnx')!==-1||d.name.indexOf('tts')!==-1)});
+    }
+  }catch(e){}
+
+  if(modelCached){
+    setKokoroStatus('loading','🔄 Kokoro AI 캐시에서 로딩 중... (이미 다운로드됨)');
+  }else{
+    setKokoroStatus('loading','🔄 Kokoro AI 모델 로딩 중... (최초 1회, ~80MB 다운로드 후 캐시됨)');
+  }
   try{
     // Configure tts.rocks TTS object
     window.TTS=window.TTS||{};
@@ -262,6 +279,8 @@ async function initKokoroEngine(){
 // ===== Audio cache & preload =====
 function cacheKey(text,voiceName,speed){return voiceName+'|'+speed+'|'+text}
 
+function yieldToUI(){return new Promise(function(r){setTimeout(r,50)})}
+
 async function preloadChapter(chIdx){
   if(!kokoroReady) return;
   var sel=getVoiceSelection();
@@ -278,16 +297,17 @@ async function preloadChapter(chIdx){
     var key=cacheKey(item.text,item.voice,item.speed);
     if(audioCache[key]) continue;
     try{
+      await yieldToUI();  // UI 블로킹 방지
       TTS.kokoroSettings.voiceName=item.voice;
       TTS.kokoroSettings.speed=item.speed;
       if(TTS.kokoroTtsInstance&&TTS.kokoroTtsInstance.generate){
         var raw=await TTS.kokoroTtsInstance.generate(item.text);
         if(raw&&raw.audio){
-          var wav=raw.audio;
-          var blob=new Blob([wav],{type:'audio/wav'});
+          var blob=new Blob([raw.audio],{type:'audio/wav'});
           audioCache[key]=URL.createObjectURL(blob);
         }
       }
+      await yieldToUI();  // 문장 사이 UI 양보
     }catch(e){console.warn('preload skip:',e)}
   }
   preloading=false;
