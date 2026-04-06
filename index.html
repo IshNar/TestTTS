@@ -191,6 +191,8 @@ var current=0, playingEl=null, repeatState={};
 var synth=window.speechSynthesis, voices=[];
 var kokoroReady=false, kokoroInitializing=false;
 var audioCache={};  // cache: key -> audio src URL
+var generatingKey=null;  // key currently being generated
+var generatingPromise=null;  // promise for current generation
 
 // Kokoro voice list (Kokoro-82M-v1.0 via tts.rocks)
 var kokoroVoices=[
@@ -277,36 +279,47 @@ async function initKokoroEngine(){
 function cacheKey(text,voiceName,speed){return voiceName+'|'+speed+'|'+text}
 
 // Generate audio silently via kokoroTTS and cache the result
-// kokoroTTS generates + plays, so we mute → generate → pause → cache src
+// Tracks generating state so concurrent calls can wait instead of colliding
 async function generateAndCache(text,voiceName,speed){
   var key=cacheKey(text,voiceName,speed);
   if(audioCache[key]) return audioCache[key];
+
+  // If this exact key is already being generated, wait for it
+  if(generatingKey===key&&generatingPromise) return generatingPromise;
+
+  // If something else is generating, wait for it to finish first
+  if(generatingPromise){
+    try{await generatingPromise}catch(e){}
+  }
+
+  generatingKey=key;
   TTS.kokoroSettings.voiceName=voiceName;
   TTS.kokoroSettings.speed=speed;
-  return new Promise(function(resolve){
+
+  generatingPromise=new Promise(function(resolve){
     var origFinished=TTS.finishedAudio;
-    TTS.finishedAudio=function(){
+    var resolved=false;
+    function done(src){
+      if(resolved) return;
+      resolved=true;
+      generatingKey=null;
+      generatingPromise=null;
       TTS.finishedAudio=origFinished;
-      // Audio just finished generating+playing silently, cache its src
-      if(TTS.audio&&TTS.audio.src){
-        audioCache[key]=TTS.audio.src;
-        resolve(audioCache[key]);
-      }else{resolve(null)}
+      if(src) audioCache[key]=src;
+      resolve(src);
+    }
+    TTS.finishedAudio=function(){
+      if(TTS.audio&&TTS.audio.src) done(TTS.audio.src); else done(null);
     };
     TTS.kokoroTTS(text).then(function(){
-      // kokoroTTS started playback — immediately mute & pause to stay silent
       if(TTS.audio){
         TTS.audio.pause();
         TTS.audio.muted=true;
-        // Cache the src
-        if(TTS.audio.src){
-          audioCache[key]=TTS.audio.src;
-          TTS.finishedAudio=origFinished;
-          resolve(audioCache[key]);
-        }
+        if(TTS.audio.src) done(TTS.audio.src);
       }
-    }).catch(function(){TTS.finishedAudio=origFinished;resolve(null)});
+    }).catch(function(){done(null)});
   });
+  return generatingPromise;
 }
 
 // Prefetch next passage while current one is playing
@@ -314,16 +327,13 @@ function prefetchNext(ci,pi){
   if(!kokoroReady) return;
   var sel=getVoiceSelection();
   if(sel.type!=='kokoro') return;
-  var nextPi=pi+1;
-  var nextCi=ci;
-  // If end of chapter, try next chapter's first passage
+  var nextPi=pi+1, nextCi=ci;
   if(nextPi>=chapters[ci].p.length){nextCi=ci+1;nextPi=0}
   if(nextCi>=chapters.length) return;
   var text=stripTags(chapters[nextCi].p[nextPi][0]);
   var speed=parseFloat(document.getElementById('speedSelect').value);
   var key=cacheKey(text,sel.voice.voice,speed);
-  if(audioCache[key]) return; // already cached
-  // Wait a bit for current audio to start playing, then generate next
+  if(audioCache[key]) return;
   setTimeout(function(){
     console.log('Prefetching §'+chapters[nextCi].num+'.'+(nextPi+1));
     generateAndCache(text,sel.voice.voice,speed);
@@ -450,39 +460,61 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
       return;
     }
 
-    // Cache miss — generate via kokoroTTS (proven API)
+    // Cache miss — check if prefetch is already generating this key
+    if(generatingKey===key&&generatingPromise){
+      btn.textContent='⏳ 거의 완료...';
+      var src=await generatingPromise;
+      if(src){
+        audioCache[key]=src;
+        btn.textContent='🔊 재생중';
+        var a3=new Audio(src);
+        a3.onended=function(){onSpeakEnd(ci,pi,btn)};
+        a3.onerror=function(){resetBtn(btn)};
+        TTS.audio=a3;
+        a3.play();
+        prefetchNext(ci,pi);
+        return;
+      }
+    }
+
+    // If prefetch is generating something else, wait for it
+    if(generatingPromise){
+      btn.textContent='⏳ 잠시 대기...';
+      try{await generatingPromise}catch(e){}
+    }
+
+    // Generate this passage
+    btn.textContent='⏳ 생성중...';
+    var src2=await generateAndCache(text,voiceObj.voice,speed);
+    if(src2){
+      btn.textContent='🔊 재생중';
+      var a4=new Audio(src2);
+      a4.onended=function(){onSpeakEnd(ci,pi,btn)};
+      a4.onerror=function(){resetBtn(btn)};
+      TTS.audio=a4;
+      a4.play();
+      prefetchNext(ci,pi);
+      return;
+    }
+
+    // Final fallback — direct kokoroTTS
     btn.textContent='⏳ 생성중...';
     TTS.kokoroSettings.voiceName = voiceObj.voice;
     TTS.kokoroSettings.speed = speed;
-
     var origFinished=TTS.finishedAudio, handled=false;
     TTS.finishedAudio=function(e){
-      if(!handled){
-        handled=true;
-        TTS.finishedAudio=origFinished;
-        // Cache for replay
+      if(!handled){handled=true;TTS.finishedAudio=origFinished;
         if(TTS.audio&&TTS.audio.src) audioCache[key]=TTS.audio.src;
-        onSpeakEnd(ci,pi,btn);
-      }
+        onSpeakEnd(ci,pi,btn);}
     };
-
     await TTS.kokoroTTS(text);
     btn.textContent='🔊 재생중';
-
-    // Cache the generated audio src
     if(TTS.audio&&TTS.audio.src) audioCache[key]=TTS.audio.src;
-
     if(TTS.audio&&!handled){
       TTS.audio.onended=function(){
-        if(!handled){
-          handled=true;
-          TTS.finishedAudio=origFinished;
-          onSpeakEnd(ci,pi,btn);
-        }
+        if(!handled){handled=true;TTS.finishedAudio=origFinished;onSpeakEnd(ci,pi,btn)}
       };
     }
-
-    // While playing, prefetch next passage
     prefetchNext(ci,pi);
 
   }catch(err){
