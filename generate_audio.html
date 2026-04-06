@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>孫子兵法 TTS 음성 일괄 생성기</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#1a1a2e;color:#eee;padding:20px;min-height:100vh}
+h1{text-align:center;margin-bottom:8px;font-size:24px}
+.subtitle{text-align:center;color:#999;font-size:13px;margin-bottom:24px}
+.status-box{background:#16213e;border-radius:12px;padding:20px;margin-bottom:16px}
+.status-box h2{font-size:15px;color:#7ba0cc;margin-bottom:12px}
+
+/* Overall progress */
+.overall-bar-wrap{background:#0f3460;border-radius:8px;height:32px;overflow:hidden;margin-bottom:8px;position:relative}
+.overall-bar{height:100%;background:linear-gradient(90deg,#2e7d32,#43a047);border-radius:8px;transition:width 0.3s;width:0%}
+.overall-bar-text{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:bold;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.5)}
+.overall-stats{display:flex;justify-content:space-between;font-size:12px;color:#888;margin-bottom:16px}
+
+/* Voice progress */
+.voice-section{margin-bottom:12px;padding:12px;background:#1a2744;border-radius:8px;border:1px solid #2a3a5c}
+.voice-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.voice-name{font-size:14px;font-weight:bold}
+.voice-name .icon{margin-right:4px}
+.voice-count{font-size:12px;color:#999}
+.voice-bar-wrap{background:#0f3460;border-radius:6px;height:20px;overflow:hidden;position:relative}
+.voice-bar{height:100%;background:linear-gradient(90deg,#1565c0,#42a5f5);border-radius:6px;transition:width 0.3s;width:0%}
+.voice-bar-text{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff}
+.voice-section.active{border-color:#42a5f5;background:#1a2f55}
+.voice-section.done{border-color:#2e7d32;background:#1a2e1a}
+.voice-section.done .voice-bar{background:linear-gradient(90deg,#2e7d32,#43a047)}
+
+/* Current task */
+.current-task{background:#2a1a44;border:1px solid #5c3a8c;border-radius:8px;padding:14px;margin-bottom:16px;min-height:60px}
+.current-task .label{font-size:11px;color:#b39ddb;margin-bottom:4px}
+.current-task .text{font-size:13px;line-height:1.5;color:#e0e0e0}
+.current-task .meta{font-size:11px;color:#888;margin-top:6px}
+
+/* Controls */
+.controls{text-align:center;margin-bottom:20px}
+.btn{padding:12px 32px;border:none;border-radius:8px;font-size:15px;font-weight:bold;cursor:pointer;margin:0 6px;transition:all .2s}
+.btn-start{background:#2e7d32;color:#fff}
+.btn-start:hover{background:#388e3c}
+.btn-start:disabled{background:#555;cursor:not-allowed}
+.btn-download{background:#1565c0;color:#fff;display:none}
+.btn-download:hover{background:#1976d2}
+.btn-stop{background:#c62828;color:#fff}
+.btn-stop:hover{background:#d32f2f}
+
+/* Log */
+.log{background:#111;border-radius:8px;padding:12px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:11px;color:#aaa;margin-top:16px}
+.log .err{color:#ef5350}
+.log .ok{color:#66bb6a}
+.log .info{color:#42a5f5}
+
+/* ETA */
+.eta-box{text-align:center;font-size:13px;color:#ffb74d;margin-bottom:16px}
+</style>
+</head>
+<body>
+
+<h1>🔊 孫子兵法 TTS 음성 일괄 생성기</h1>
+<p class="subtitle">17개 음성 × 전체 문장 = 총 <span id="totalCount">0</span>개 파일 생성 → ZIP 다운로드</p>
+
+<div class="controls">
+  <button class="btn btn-start" id="btnStart" onclick="startGenerate()">▶ 생성 시작</button>
+  <button class="btn btn-stop" id="btnStop" onclick="stopGenerate()" style="display:none">■ 중지</button>
+  <button class="btn btn-download" id="btnDownload" onclick="downloadZip()">📦 ZIP 다운로드</button>
+</div>
+
+<div class="eta-box" id="etaBox"></div>
+
+<!-- Current task -->
+<div class="current-task" id="currentTask">
+  <div class="label">대기 중</div>
+  <div class="text">시작 버튼을 눌러주세요</div>
+</div>
+
+<!-- Overall progress -->
+<div class="status-box">
+  <h2>전체 진행률</h2>
+  <div class="overall-bar-wrap">
+    <div class="overall-bar" id="overallBar"></div>
+    <div class="overall-bar-text" id="overallBarText">0 / 0</div>
+  </div>
+  <div class="overall-stats">
+    <span id="statCompleted">완료: 0</span>
+    <span id="statFailed">실패: 0</span>
+    <span id="statRemaining">남은: 0</span>
+  </div>
+</div>
+
+<!-- Per-voice progress -->
+<div id="voiceList"></div>
+
+<!-- Log -->
+<div class="log" id="log"></div>
+
+<!-- Kokoro TTS engine -->
+<script src="https://tts.rocks/tts.js"></script>
+<!-- JSZip for download -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+<script>
+// ===== Chapter data (same as index.html) =====
+var chapters=[
+{num:1,en:"Chapter 1",p:[
+['Sun Tzu said: The art of war is of vital importance to the State.'],
+['It is a matter of life and death, a road either to safety or to ruin. Hence it is a subject of inquiry which can on no account be neglected.'],
+['These are: (1) The Moral Law; (2) Heaven; (3) Earth; (4) The Commander; (5) Method and discipline.'],
+['The MORAL LAW causes the people to be in complete accord with their ruler, so that they will follow him regardless of their lives, undismayed by any danger.'],
+['HEAVEN signifies night and day, cold and heat, times and seasons.'],
+['EARTH comprises distances, great and small; danger and security; open ground and narrow passes; the chances of life and death.'],
+['The COMMANDER stands for the virtues of wisdom, sincerity, benevolence, courage and strictness.'],
+['These five heads should be familiar to every general: he who knows them will be victorious; he who knows them not will fail.'],
+['All warfare is based on deception.'],
+['Hence, when able to attack, we must seem unable; when using our forces, we must seem inactive; when we are near, we must make the enemy believe we are far away; when far away, we must make him believe we are near.'],
+['Hold out baits to entice the enemy. Feign disorder, and crush him.'],
+['If your opponent is of choleric temper, seek to irritate him. Pretend to be weak, that he may grow arrogant.'],
+['Attack him where he is unprepared, appear where you are not expected.'],
+['Now the general who wins a battle makes many calculations in his temple ere the battle is fought. The general who loses a battle makes but few calculations beforehand.'],
+]},
+{num:2,en:"Chapter 2",p:[
+['When you engage in actual fighting, if victory is long in coming, then men\'s weapons will grow dull and their ardor will be damped.'],
+['Thus, though we have heard of stupid haste in war, cleverness has never been seen associated with long delays.'],
+['There is no instance of a country having benefited from prolonged warfare.'],
+['Bring war material with you from home, but forage on the enemy. Thus the army will have food enough for its needs.'],
+['In war, then, let your great object be victory, not lengthy campaigns.'],
+]},
+{num:3,en:"Chapter 3",p:[
+['Hence to fight and conquer in all your battles is not supreme excellence; supreme excellence consists in breaking the enemy\'s resistance without fighting.'],
+['Thus the highest form of generalship is to balk the enemy\'s plans; the next best is to prevent the junction of the enemy\'s forces; the next in order is to attack the enemy\'s army in the field; and the worst policy of all is to besiege walled cities.'],
+['Therefore the skillful leader subdues the enemy\'s troops without any fighting; he captures their cities without laying siege to them; he overthrows their kingdom without lengthy operations in the field.'],
+['He will win who knows when to fight and when not to fight. He will win who knows how to handle both superior and inferior forces. He will win whose army is animated by the same spirit throughout all its ranks.'],
+['If you know the enemy and know yourself, you need not fear the result of a hundred battles. If you know yourself but not the enemy, for every victory gained you will also suffer a defeat. If you know neither the enemy nor yourself, you will succumb in every battle.'],
+]},
+{num:4,en:"Chapter 4",p:[
+['The good fighters of old first put themselves beyond the possibility of defeat, and then waited for an opportunity of defeating the enemy.'],
+['To secure ourselves against defeat lies in our own hands, but the opportunity of defeating the enemy is provided by the enemy himself.'],
+['Thus it is that in war the victorious strategist only seeks battle after the victory has been won, whereas he who is destined to defeat first fights and afterwards looks for victory.'],
+['The onrush of a conquering force is like the bursting of pent-up waters into a chasm a thousand fathoms deep.'],
+]},
+{num:5,en:"Chapter 5",p:[
+['In all fighting, the direct method may be used for joining battle, but indirect methods will be needed in order to secure victory.'],
+['There are not more than five musical notes, yet the combinations of these five give rise to more melodies than can ever be heard.'],
+['Energy may be likened to the bending of a crossbow; decision, to the releasing of a trigger.'],
+['Simulated disorder postulates perfect discipline, simulated fear postulates courage; simulated weakness postulates strength.'],
+]},
+{num:6,en:"Chapter 6",p:[
+['Whoever is first in the field and awaits the coming of the enemy, will be fresh for the fight; whoever is second in the field and has to hasten to battle, will arrive exhausted.'],
+['Therefore the clever combatant imposes his will on the enemy, but does not allow the enemy\'s will to be imposed on him.'],
+['All men can see the tactics whereby I conquer, but what none can see is the strategy out of which victory is evolved.'],
+['Military tactics are like unto water; for water in its natural course runs away from high places and hastens downwards. So in war, avoid what is strong and strike at what is weak.'],
+['Therefore, just as water retains no constant shape, so in warfare there are no constant conditions.'],
+]},
+{num:7,en:"Chapter 7",p:[
+['Let your rapidity be that of the wind, your compactness that of the forest.'],
+['In raiding and plundering be like fire, in immovability like a mountain.'],
+['Let your plans be dark and impenetrable as night, and when you move, fall like a thunderbolt.'],
+['A whole army may be robbed of its spirit; a commander-in-chief may be robbed of his presence of mind.'],
+['When you surround an army, leave an outlet free. Do not press a desperate foe too hard.'],
+]},
+{num:8,en:"Chapter 8",p:[
+['There are roads which must not be followed, armies which must not be attacked, towns which must not be besieged, positions which must not be contested, commands of the sovereign which must not be obeyed.'],
+['The art of war teaches us to rely not on the likelihood of the enemy\'s not coming, but on our own readiness to receive him.'],
+['There are five dangerous faults which may affect a general: Recklessness, which leads to destruction; cowardice, which leads to capture; a hasty temper, which can be provoked by insults; a delicacy of honor which is sensitive to shame; over-solicitude for his men, which exposes him to worry.'],
+]},
+{num:9,en:"Chapter 9",p:[
+['Camp in high places, facing the sun. Do not climb heights in order to fight.'],
+['Humble words and increased preparations are signs that the enemy is about to advance. Violent language and driving forward as if to the attack is a sign that he will retreat.'],
+['Therefore soldiers must be treated in the first instance with humanity, but kept under control by means of iron discipline. This is a certain road to victory.'],
+]},
+{num:10,en:"Chapter 10",p:[
+['The natural formation of the country is the soldier\'s best ally.'],
+['He who knows these things, and in fighting puts his knowledge into practice, will win his battles.'],
+['If you know the enemy and know yourself, your victory will not stand in doubt; if you know Heaven and know Earth, you may make your victory complete.'],
+]},
+{num:11,en:"Chapter 11",p:[
+['On desperate ground, fight.'],
+['Rapidity is the essence of war: take advantage of the enemy\'s unreadiness, make your way by unexpected routes, and attack unguarded spots.'],
+['Throw your soldiers into positions whence there is no escape, and they will prefer death to flight.'],
+['At the critical moment, the leader of an army acts like one who has climbed up a height and then kicks away the ladder behind him.'],
+['He burns his boats and breaks his cooking-pots.'],
+]},
+{num:12,en:"Chapter 12",p:[
+['Move not unless you see an advantage; use not your troops unless there is something to be gained; fight not unless the position is critical.'],
+['No ruler should put troops into the field merely to gratify his own spleen; no general should fight a battle simply out of pique.'],
+['Anger may in time change to gladness; vexation may be succeeded by content. But a kingdom that has once been destroyed can never come again into being; nor can the dead ever be brought back to life.'],
+['Hence the enlightened ruler is heedful, and the good general full of caution. This is the way to keep a country at peace and an army intact.'],
+]},
+{num:13,en:"Chapter 13",p:[
+['What enables the wise sovereign and the good general to strike and conquer, and achieve things beyond the reach of ordinary men, is FOREKNOWLEDGE.'],
+['Knowledge of the enemy\'s dispositions can only be obtained from other men.'],
+['Hence the use of spies, of whom there are five classes: Local spies; inward spies; converted spies; doomed spies; surviving spies.'],
+['Be subtle! be subtle! and use your spies for every kind of business.'],
+['Hence it is only the enlightened ruler and the wise general who will use the highest intelligence of the army for purposes of spying and thereby they achieve great results.'],
+]}
+];
+
+var kokoroVoices=[
+  {name:'Heart (미국 여성, 기본)', voice:'af_heart',    gender:'F', region:'US'},
+  {name:'Sky (미국 여성)',         voice:'af_sky',      gender:'F', region:'US'},
+  {name:'Bella (미국 여성)',       voice:'af_bella',    gender:'F', region:'US'},
+  {name:'Nicole (미국 여성)',      voice:'af_nicole',   gender:'F', region:'US'},
+  {name:'Sarah (미국 여성)',       voice:'af_sarah',    gender:'F', region:'US'},
+  {name:'Nova (미국 여성)',        voice:'af_nova',     gender:'F', region:'US'},
+  {name:'Alloy (미국 여성)',       voice:'af_alloy',    gender:'F', region:'US'},
+  {name:'Jessica (미국 여성)',     voice:'af_jessica',  gender:'F', region:'US'},
+  {name:'River (미국 여성)',       voice:'af_river',    gender:'F', region:'US'},
+  {name:'Aoede (미국 여성)',       voice:'af_aoede',    gender:'F', region:'US'},
+  {name:'Kore (미국 여성)',        voice:'af_kore',     gender:'F', region:'US'},
+  {name:'Adam (미국 남성)',        voice:'am_adam',     gender:'M', region:'US'},
+  {name:'Michael (미국 남성)',     voice:'am_michael',  gender:'M', region:'US'},
+  {name:'Emma (영국 여성)',        voice:'bf_emma',     gender:'F', region:'UK'},
+  {name:'Isabella (영국 여성)',    voice:'bf_isabella', gender:'F', region:'UK'},
+  {name:'George (영국 남성)',      voice:'bm_george',   gender:'M', region:'UK'},
+  {name:'Lewis (영국 남성)',       voice:'bm_lewis',    gender:'M', region:'UK'},
+];
+
+// Count total
+var totalPassages=0;
+chapters.forEach(function(c){totalPassages+=c.p.length});
+var totalFiles=kokoroVoices.length*totalPassages;
+document.getElementById('totalCount').textContent=totalFiles;
+
+// ===== State =====
+var zip=null, stopped=false, completed=0, failed=0;
+var startTime=0;
+
+// ===== UI helpers =====
+function log(msg,cls){
+  var el=document.getElementById('log');
+  var d=document.createElement('div');
+  if(cls)d.className=cls;
+  d.textContent='['+new Date().toLocaleTimeString()+'] '+msg;
+  el.appendChild(d);
+  el.scrollTop=el.scrollHeight;
+}
+
+function updateOverall(){
+  var done=completed+failed;
+  var pct=totalFiles?Math.round(done/totalFiles*100):0;
+  document.getElementById('overallBar').style.width=pct+'%';
+  document.getElementById('overallBarText').textContent=done+' / '+totalFiles+' ('+pct+'%)';
+  document.getElementById('statCompleted').textContent='완료: '+completed;
+  document.getElementById('statFailed').textContent='실패: '+failed;
+  document.getElementById('statRemaining').textContent='남은: '+(totalFiles-done);
+
+  // ETA
+  if(done>0&&done<totalFiles){
+    var elapsed=(Date.now()-startTime)/1000;
+    var perItem=elapsed/done;
+    var remaining=(totalFiles-done)*perItem;
+    var mins=Math.floor(remaining/60);
+    var secs=Math.floor(remaining%60);
+    document.getElementById('etaBox').textContent='예상 남은 시간: '+mins+'분 '+secs+'초';
+  }else if(done>=totalFiles){
+    document.getElementById('etaBox').textContent='';
+  }
+}
+
+function updateVoiceBar(vi,count){
+  var bar=document.getElementById('vbar-'+vi);
+  var text=document.getElementById('vtext-'+vi);
+  var pct=totalPassages?Math.round(count/totalPassages*100):0;
+  if(bar)bar.style.width=pct+'%';
+  if(text)text.textContent=count+'/'+totalPassages;
+}
+
+function setCurrentTask(voiceName,chNum,pIdx,text){
+  var el=document.getElementById('currentTask');
+  el.innerHTML='<div class="label">현재 생성 중</div>'+
+    '<div class="text">🔊 <b>'+voiceName+'</b> — 제'+chNum+'편 §'+chNum+'.'+(pIdx+1)+'</div>'+
+    '<div class="meta" style="margin-top:6px;font-size:11px;color:#bbb;line-height:1.4">"'+
+    (text.length>100?text.substring(0,100)+'...':text)+'"</div>';
+}
+
+// ===== Build voice list UI =====
+function buildVoiceList(){
+  var html='';
+  kokoroVoices.forEach(function(v,i){
+    var icon=v.gender==='M'?'👨':'👩';
+    html+='<div class="voice-section" id="vsec-'+i+'">'+
+      '<div class="voice-header">'+
+        '<span class="voice-name"><span class="icon">'+icon+'</span>['+v.region+'] '+v.name+'</span>'+
+        '<span class="voice-count" id="vcnt-'+i+'">0/'+totalPassages+'</span>'+
+      '</div>'+
+      '<div class="voice-bar-wrap">'+
+        '<div class="voice-bar" id="vbar-'+i+'"></div>'+
+        '<div class="voice-bar-text" id="vtext-'+i+'">0/'+totalPassages+'</div>'+
+      '</div></div>';
+  });
+  document.getElementById('voiceList').innerHTML=html;
+}
+buildVoiceList();
+
+// ===== Kokoro init =====
+async function initKokoro(){
+  log('Kokoro AI 모델 로딩 중...','info');
+  window.TTS=window.TTS||{};
+  TTS.TTSProvider='kokoro';
+  TTS.useKokoroTTS=true;
+  if(!TTS.kokoroSettings) TTS.kokoroSettings={rate:false,voiceName:false,model:'kokoro-82M-v1.0'};
+  if(typeof TTS.initKokoro==='function'){
+    var result=await TTS.initKokoro();
+    if(result!==false&&TTS.kokoroTtsInstance){
+      log('Kokoro AI 준비 완료! ('+( TTS.kokoroDevice||'wasm')+')','ok');
+      return true;
+    }
+  }
+  log('Kokoro 로드 실패!','err');
+  return false;
+}
+
+// ===== Generate one audio =====
+function generateOne(text,voiceName){
+  return new Promise(function(resolve){
+    TTS.kokoroSettings.voiceName=voiceName;
+    TTS.kokoroSettings.speed=1.0;
+
+    var origFinished=TTS.finishedAudio;
+    var resolved=false;
+
+    function done(src){
+      if(resolved) return;
+      resolved=true;
+      TTS.finishedAudio=origFinished;
+      resolve(src);
+    }
+
+    TTS.finishedAudio=function(){
+      if(TTS.audio&&TTS.audio.src) done(TTS.audio.src);
+      else done(null);
+    };
+
+    TTS.kokoroTTS(text).then(function(){
+      if(TTS.audio){
+        TTS.audio.pause();
+        TTS.audio.muted=true;
+        if(TTS.audio.src) done(TTS.audio.src);
+      }
+    }).catch(function(e){
+      log('생성 오류: '+e.message,'err');
+      done(null);
+    });
+
+    // Timeout 60s
+    setTimeout(function(){done(null)},60000);
+  });
+}
+
+// Convert blob URL or data URL to ArrayBuffer
+async function urlToArrayBuffer(url){
+  var resp=await fetch(url);
+  return resp.arrayBuffer();
+}
+
+// ===== Main generate loop =====
+async function startGenerate(){
+  document.getElementById('btnStart').disabled=true;
+  document.getElementById('btnStart').style.display='none';
+  document.getElementById('btnStop').style.display='inline-block';
+  document.getElementById('btnDownload').style.display='none';
+  stopped=false;
+  completed=0;
+  failed=0;
+  startTime=Date.now();
+  zip=new JSZip();
+
+  // Init Kokoro
+  var ok=await initKokoro();
+  if(!ok){
+    log('Kokoro 초기화 실패. 중단합니다.','err');
+    document.getElementById('btnStart').disabled=false;
+    document.getElementById('btnStart').style.display='inline-block';
+    document.getElementById('btnStop').style.display='none';
+    return;
+  }
+
+  // Generate all
+  for(var vi=0;vi<kokoroVoices.length;vi++){
+    if(stopped) break;
+    var voice=kokoroVoices[vi];
+    var sec=document.getElementById('vsec-'+vi);
+    if(sec) sec.classList.add('active');
+    var voiceDone=0;
+
+    log('음성 시작: ['+voice.region+'] '+voice.name+' ('+voice.voice+')','info');
+
+    for(var ci=0;ci<chapters.length;ci++){
+      if(stopped) break;
+      var ch=chapters[ci];
+      for(var pi=0;pi<ch.p.length;pi++){
+        if(stopped) break;
+        var text=ch.p[pi][0];
+        var fileName=voice.voice+'/ch'+ch.num+'-'+(pi+1)+'.wav';
+
+        setCurrentTask(voice.name,ch.num,pi,text);
+
+        var src=await generateOne(text,voice.voice);
+        if(src){
+          try{
+            var buf=await urlToArrayBuffer(src);
+            zip.file(fileName,buf);
+            completed++;
+            voiceDone++;
+            log('✓ '+fileName+' ('+Math.round(buf.byteLength/1024)+'KB)','ok');
+          }catch(e){
+            failed++;
+            log('✗ '+fileName+' 저장 실패: '+e.message,'err');
+          }
+        }else{
+          failed++;
+          log('✗ '+fileName+' 생성 실패','err');
+        }
+
+        updateVoiceBar(vi,voiceDone);
+        document.getElementById('vcnt-'+vi).textContent=voiceDone+'/'+totalPassages;
+        updateOverall();
+
+        // Small yield to keep UI responsive
+        await new Promise(function(r){setTimeout(r,50)});
+      }
+    }
+
+    if(sec){sec.classList.remove('active');sec.classList.add('done')}
+  }
+
+  // Done
+  document.getElementById('btnStop').style.display='none';
+  if(!stopped&&completed>0){
+    document.getElementById('btnDownload').style.display='inline-block';
+    log('===== 생성 완료! 총 '+completed+'개 성공, '+failed+'개 실패 =====','ok');
+    document.getElementById('currentTask').innerHTML=
+      '<div class="label">완료!</div><div class="text">✅ '+completed+'개 파일 생성 완료. ZIP 다운로드 버튼을 눌러주세요.</div>';
+    document.getElementById('etaBox').textContent='총 소요 시간: '+Math.round((Date.now()-startTime)/1000)+'초';
+  }else if(stopped){
+    document.getElementById('btnStart').disabled=false;
+    document.getElementById('btnStart').style.display='inline-block';
+    log('===== 사용자에 의해 중지됨 =====','info');
+    if(completed>0) document.getElementById('btnDownload').style.display='inline-block';
+  }
+}
+
+function stopGenerate(){
+  stopped=true;
+  log('중지 요청...','info');
+  document.getElementById('btnStop').style.display='none';
+}
+
+async function downloadZip(){
+  log('ZIP 파일 생성 중... (잠시 대기)','info');
+  document.getElementById('btnDownload').textContent='⏳ 압축중...';
+  document.getElementById('btnDownload').disabled=true;
+  try{
+    var blob=await zip.generateAsync({type:'blob'},function(meta){
+      document.getElementById('btnDownload').textContent='⏳ 압축중... '+Math.round(meta.percent)+'%';
+    });
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement('a');
+    a.href=url;
+    a.download='tts_audio.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    log('ZIP 다운로드 시작!','ok');
+  }catch(e){
+    log('ZIP 생성 오류: '+e.message,'err');
+  }
+  document.getElementById('btnDownload').textContent='📦 ZIP 다운로드';
+  document.getElementById('btnDownload').disabled=false;
+}
+</script>
+</body>
+</html>

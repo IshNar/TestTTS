@@ -414,6 +414,21 @@ function render(){
 function go(i){stopAll();current=i;render();window.scrollTo(0,0)}
 function goNav(d){go(current+d)}
 
+// ===== Pre-generated audio path =====
+function pregenPath(voiceName,chNum,pIdx){
+  return 'audio/'+voiceName+'/ch'+chNum+'-'+(pIdx+1)+'.wav';
+}
+
+// Check if pre-generated file exists (cached after first check)
+var pregenCache={};  // path -> true/false
+function checkPregen(path){
+  if(path in pregenCache) return Promise.resolve(pregenCache[path]);
+  return fetch(path,{method:'HEAD'}).then(function(r){
+    pregenCache[path]=r.ok;
+    return r.ok;
+  }).catch(function(){pregenCache[path]=false;return false});
+}
+
 // ===== TTS =====
 function speak(ci,pi,btn){
   stopSpeech();
@@ -439,13 +454,29 @@ function speakLocal(text,voice,ci,pi,btn){
 
 async function speakKokoro(text,voiceObj,ci,pi,btn){
   try{
+    var speed=parseFloat(document.getElementById('speedSelect').value);
+
+    // 1st priority: pre-generated audio file
+    var filePath=pregenPath(voiceObj.voice,chapters[ci].num,pi);
+    var hasFile=await checkPregen(filePath);
+    if(hasFile){
+      btn.textContent='🔊 재생중';
+      var af=new Audio(filePath);
+      af.playbackRate=speed;
+      af.onended=function(){onSpeakEnd(ci,pi,btn)};
+      af.onerror=function(){resetBtn(btn)};
+      TTS.audio=af;
+      af.play();
+      return;
+    }
+
+    // 2nd priority: runtime cache
     if(!kokoroReady){
       btn.textContent='⏳ 준비중...';
       var ok=await initKokoroEngine();
       if(!ok){speakLocal(text,null,ci,pi,btn);return}
     }
 
-    var speed=parseFloat(document.getElementById('speedSelect').value);
     var key=cacheKey(text,voiceObj.voice,speed);
 
     // Cache hit — instant playback, then prefetch next
