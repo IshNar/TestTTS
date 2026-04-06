@@ -190,6 +190,8 @@ var chapters=[
 var current=0, playingEl=null, repeatState={};
 var synth=window.speechSynthesis, voices=[];
 var kokoroReady=false, kokoroInitializing=false;
+var audioCache={};  // cache: key -> audio blob URL
+var preloadQueue=null, preloading=false;
 
 // Kokoro voice list (Kokoro-82M-v1.0 via tts.rocks)
 var kokoroVoices=[
@@ -240,6 +242,8 @@ async function initKokoroEngine(){
           var el=document.getElementById('kokoroStatus');
           if(el)el.style.display='none';
         },3500);
+        // Start preloading current chapter
+        setTimeout(function(){preloadChapter(current)},500);
       } else {
         throw new Error('인스턴스 생성 실패');
       }
@@ -253,6 +257,40 @@ async function initKokoroEngine(){
   }
   kokoroInitializing=false;
   return kokoroReady;
+}
+
+// ===== Audio cache & preload =====
+function cacheKey(text,voiceName,speed){return voiceName+'|'+speed+'|'+text}
+
+async function preloadChapter(chIdx){
+  if(!kokoroReady) return;
+  var sel=getVoiceSelection();
+  if(sel.type!=='kokoro') return;
+  var speed=parseFloat(document.getElementById('speedSelect').value);
+  var voiceName=sel.voice.voice;
+  var texts=chapters[chIdx].p.map(function(pair){return stripTags(pair[0])});
+  preloadQueue=texts.map(function(t){return {text:t,voice:voiceName,speed:speed}});
+  if(preloading) return;
+  preloading=true;
+  while(preloadQueue&&preloadQueue.length>0){
+    var item=preloadQueue.shift();
+    if(!item) break;
+    var key=cacheKey(item.text,item.voice,item.speed);
+    if(audioCache[key]) continue;
+    try{
+      TTS.kokoroSettings.voiceName=item.voice;
+      TTS.kokoroSettings.speed=item.speed;
+      if(TTS.kokoroTtsInstance&&TTS.kokoroTtsInstance.generate){
+        var raw=await TTS.kokoroTtsInstance.generate(item.text);
+        if(raw&&raw.audio){
+          var wav=raw.audio;
+          var blob=new Blob([wav],{type:'audio/wav'});
+          audioCache[key]=URL.createObjectURL(blob);
+        }
+      }
+    }catch(e){console.warn('preload skip:',e)}
+  }
+  preloading=false;
 }
 
 // ===== Voice dropdown =====
@@ -326,7 +364,7 @@ function render(){
   document.getElementById('prevBtn').disabled=current===0;
   document.getElementById('nextBtn').disabled=current===chapters.length-1;
 }
-function go(i){stopAll();current=i;render();window.scrollTo(0,0)}
+function go(i){stopAll();current=i;render();window.scrollTo(0,0);if(kokoroReady)setTimeout(function(){preloadChapter(i)},300)}
 function goNav(d){go(current+d)}
 
 // ===== TTS =====
@@ -360,13 +398,42 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
       if(!ok){speakLocal(text,null,ci,pi,btn);return}
     }
 
-    // ★★★ KEY FIX: Set voice & speed via tts.rocks internal API ★★★
-    TTS.kokoroSettings.voiceName = voiceObj.voice;  // e.g. "af_sky", "bm_george"
-    TTS.kokoroSettings.speed = parseFloat(document.getElementById('speedSelect').value);
+    var speed=parseFloat(document.getElementById('speedSelect').value);
+    var key=cacheKey(text,voiceObj.voice,speed);
 
+    // Check cache first — instant playback
+    if(audioCache[key]){
+      btn.textContent='🔊 재생중';
+      var a=new Audio(audioCache[key]);
+      a.onended=function(){onSpeakEnd(ci,pi,btn)};
+      a.onerror=function(){resetBtn(btn)};
+      TTS.audio=a;
+      a.play();
+      return;
+    }
+
+    // Generate & cache
+    TTS.kokoroSettings.voiceName = voiceObj.voice;
+    TTS.kokoroSettings.speed = speed;
+
+    // Try direct generate for caching
+    if(TTS.kokoroTtsInstance&&TTS.kokoroTtsInstance.generate){
+      var raw=await TTS.kokoroTtsInstance.generate(text);
+      if(raw&&raw.audio){
+        var blob=new Blob([raw.audio],{type:'audio/wav'});
+        audioCache[key]=URL.createObjectURL(blob);
+        btn.textContent='🔊 재생중';
+        var a2=new Audio(audioCache[key]);
+        a2.onended=function(){onSpeakEnd(ci,pi,btn)};
+        a2.onerror=function(){resetBtn(btn)};
+        TTS.audio=a2;
+        a2.play();
+        return;
+      }
+    }
+
+    // Fallback: use tts.rocks pipeline
     btn.textContent='🔊 재생중';
-
-    // Hook TTS.finishedAudio for playback-end detection
     var origFinished = TTS.finishedAudio;
     var handled = false;
     TTS.finishedAudio = function(e){
@@ -376,11 +443,7 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
         onSpeakEnd(ci,pi,btn);
       }
     };
-
-    // Call tts.rocks kokoroTTS
     await TTS.kokoroTTS(text);
-
-    // Backup: also wire TTS.audio.onended
     if(TTS.audio && !handled){
       TTS.audio.onended = function(e){
         if(!handled){
