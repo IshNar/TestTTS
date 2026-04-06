@@ -264,8 +264,7 @@ async function initKokoroEngine(){
           var el=document.getElementById('kokoroStatus');
           if(el)el.style.display='none';
         },3500);
-        // Start preloading current chapter
-        setTimeout(function(){preloadChapter(current)},500);
+        // Preload tags will update on first play (no auto-preload to avoid UI blocking)
       } else {
         throw new Error('인스턴스 생성 실패');
       }
@@ -421,7 +420,7 @@ function render(){
       h+='<div class="btn-row">';
       h+='<button class="listen-btn" onclick="speak('+i+','+j+',this)">▶ Listen</button>';
       h+='<button class="repeat-btn'+(isRepeat?' active':'')+'" onclick="toggleRepeat('+i+','+j+',this)">'+(isRepeat?'■ 반복중':'🔁 Repeat')+'</button>';
-      var plText=stripTags(pair[0]),plSel=getVoiceSelection(),plState='waiting',plLabel='⏳ 대기';
+      var plText=stripTags(pair[0]),plSel=getVoiceSelection(),plState='',plLabel='';
       if(plSel.type==='kokoro'){
         var spd=parseFloat(document.getElementById('speedSelect').value);
         if(audioCache[cacheKey(plText,plSel.voice.voice,spd)]){plState='done';plLabel='✅ 준비됨'}
@@ -434,7 +433,7 @@ function render(){
   document.getElementById('prevBtn').disabled=current===0;
   document.getElementById('nextBtn').disabled=current===chapters.length-1;
 }
-function go(i){stopAll();current=i;render();window.scrollTo(0,0);if(kokoroReady)setTimeout(function(){preloadChapter(i)},300)}
+function go(i){stopAll();current=i;render();window.scrollTo(0,0)}
 function goNav(d){go(current+d)}
 
 // ===== TTS =====
@@ -482,12 +481,8 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
       return;
     }
 
-    // Cache miss — pause preload, generate, then resume
-    var wasPreloading=preloading;
-    var savedQueue=preloadQueue?preloadQueue.slice():null;
-    var savedChapter=preloadChapterIdx;
-    if(wasPreloading) cancelPreload();
-    await yieldToUI();
+    // Cache miss — generate on demand
+
 
     btn.textContent='⏳ 생성중...';
     TTS.kokoroSettings.voiceName = voiceObj.voice;
@@ -503,8 +498,8 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
         var a2=new Audio(audioCache[key]);
         a2.onended=function(){
           onSpeakEnd(ci,pi,btn);
-          // Resume preload after playback ends
-          if(wasPreloading&&savedChapter>=0) setTimeout(function(){preloadChapter(savedChapter)},200);
+
+
         };
         a2.onerror=function(){resetBtn(btn)};
         TTS.audio=a2;
@@ -522,7 +517,6 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
         handled = true;
         TTS.finishedAudio = origFinished;
         onSpeakEnd(ci,pi,btn);
-        if(wasPreloading&&savedChapter>=0) setTimeout(function(){preloadChapter(savedChapter)},200);
       }
     };
     await TTS.kokoroTTS(text);
