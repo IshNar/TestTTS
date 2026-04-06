@@ -295,6 +295,52 @@ function buildVoiceList(){
 }
 buildVoiceList();
 
+// ===== Download progress tracking =====
+var origFetch=window.fetch;
+window.fetch=function(){
+  return origFetch.apply(this,arguments).then(function(response){
+    // Only track large downloads (model files)
+    var contentLength=response.headers.get('content-length');
+    if(!contentLength||parseInt(contentLength)<1000000) return response;
+
+    var total=parseInt(contentLength);
+    var loaded=0;
+    var taskEl=document.getElementById('currentTask');
+
+    log('모델 다운로드 시작: '+(total/1024/1024).toFixed(1)+'MB','info');
+
+    var reader=response.body.getReader();
+    var stream=new ReadableStream({
+      start:function(controller){
+        function push(){
+          reader.read().then(function(result){
+            if(result.done){controller.close();return}
+            loaded+=result.value.length;
+            var pct=Math.round(loaded/total*100);
+            var mb=(loaded/1024/1024).toFixed(1);
+            var totalMB=(total/1024/1024).toFixed(1);
+            if(taskEl){
+              taskEl.innerHTML='<div class="label">📥 모델 다운로드 중</div>'+
+                '<div class="text">'+mb+'MB / '+totalMB+'MB ('+pct+'%)</div>'+
+                '<div style="background:#0f3460;border-radius:6px;height:16px;margin-top:8px;overflow:hidden">'+
+                '<div style="height:100%;width:'+pct+'%;background:linear-gradient(90deg,#1565c0,#42a5f5);border-radius:6px;transition:width 0.3s"></div></div>';
+            }
+            controller.enqueue(result.value);
+            push();
+          });
+        }
+        push();
+      }
+    });
+
+    return new Response(stream,{
+      headers:response.headers,
+      status:response.status,
+      statusText:response.statusText
+    });
+  });
+};
+
 // ===== Kokoro init =====
 async function initKokoro(){
   log('Kokoro AI 모델 로딩 중...','info');
@@ -305,6 +351,8 @@ async function initKokoro(){
   if(typeof TTS.initKokoro==='function'){
     var result=await TTS.initKokoro();
     if(result!==false&&TTS.kokoroTtsInstance){
+      // Restore original fetch
+      window.fetch=origFetch;
       log('Kokoro AI 준비 완료! ('+( TTS.kokoroDevice||'wasm')+')','ok');
       return true;
     }
