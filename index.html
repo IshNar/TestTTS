@@ -33,6 +33,10 @@ body{font-family:Georgia,'Noto Serif CJK KR',serif;background:#faf9f6;color:#1a1
 .passage .listen-btn.stop{background:#e74c3c}
 .passage .repeat-btn.active{background:#c62828;animation:pulse 1.5s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.7}}
+.preload-tag{font-size:10px;padding:3px 8px;border-radius:10px;font-family:sans-serif;display:inline-flex;align-items:center;gap:3px;pointer-events:none}
+.preload-tag.waiting{background:#f5f5f5;color:#999}
+.preload-tag.loading{background:#fff3e0;color:#e65100}
+.preload-tag.done{background:#e8f5e9;color:#2e7d32}
 .passage .listen-btn:active,.passage .repeat-btn:active{transform:scale(.95)}
 .passage .kr{font-size:13px;color:#444;line-height:1.6;margin-top:8px;padding-top:8px;border-top:1px dashed #e0e0e0;font-family:'Noto Sans CJK KR',sans-serif}
 .passage .kr.hidden{display:none}
@@ -191,7 +195,8 @@ var current=0, playingEl=null, repeatState={};
 var synth=window.speechSynthesis, voices=[];
 var kokoroReady=false, kokoroInitializing=false;
 var audioCache={};  // cache: key -> audio blob URL
-var preloadQueue=null, preloading=false;
+var preloadQueue=null, preloading=false, preloadCancelled=false;
+var preloadTotal=0, preloadDone=0, preloadChapterIdx=-1;
 
 // Kokoro voice list (Kokoro-82M-v1.0 via tts.rocks)
 var kokoroVoices=[
@@ -281,6 +286,21 @@ function cacheKey(text,voiceName,speed){return voiceName+'|'+speed+'|'+text}
 
 function yieldToUI(){return new Promise(function(r){setTimeout(r,50)})}
 
+function cancelPreload(){
+  preloadCancelled=true;
+  preloadQueue=null;
+}
+
+function updatePreloadStatus(){}
+
+function updatePreloadTag(chIdx,pIdx,state){
+  var el=document.getElementById('pl'+chIdx+'-'+pIdx);
+  if(!el) return;
+  if(state==='loading'){el.className='preload-tag loading';el.textContent='🔄 생성중'}
+  else if(state==='done'){el.className='preload-tag done';el.textContent='✅ 준비됨'}
+  else{el.className='preload-tag waiting';el.textContent='⏳ 대기'}
+}
+
 async function preloadChapter(chIdx){
   if(!kokoroReady) return;
   var sel=getVoiceSelection();
@@ -288,16 +308,36 @@ async function preloadChapter(chIdx){
   var speed=parseFloat(document.getElementById('speedSelect').value);
   var voiceName=sel.voice.voice;
   var texts=chapters[chIdx].p.map(function(pair){return stripTags(pair[0])});
-  preloadQueue=texts.map(function(t){return {text:t,voice:voiceName,speed:speed}});
-  if(preloading) return;
+
+  // Cancel any running preload
+  if(preloading){cancelPreload(); await yieldToUI()}
+
+  preloadCancelled=false;
+  preloadChapterIdx=chIdx;
+  preloadTotal=texts.length;
+  preloadDone=0;
+
+  var items=[];
+  for(var ti=0;ti<texts.length;ti++){
+    items.push({text:texts[ti],voice:voiceName,speed:speed,pIdx:ti});
+  }
+  preloadQueue=items;
+
   preloading=true;
+
   while(preloadQueue&&preloadQueue.length>0){
+    if(preloadCancelled){preloading=false;return}
     var item=preloadQueue.shift();
     if(!item) break;
     var key=cacheKey(item.text,item.voice,item.speed);
-    if(audioCache[key]) continue;
+    if(audioCache[key]){
+      updatePreloadTag(chIdx,item.pIdx,'done');
+      continue;
+    }
+    updatePreloadTag(chIdx,item.pIdx,'loading');
     try{
-      await yieldToUI();  // UI 블로킹 방지
+      await yieldToUI();
+      if(preloadCancelled){preloading=false;return}
       TTS.kokoroSettings.voiceName=item.voice;
       TTS.kokoroSettings.speed=item.speed;
       if(TTS.kokoroTtsInstance&&TTS.kokoroTtsInstance.generate){
@@ -307,8 +347,12 @@ async function preloadChapter(chIdx){
           audioCache[key]=URL.createObjectURL(blob);
         }
       }
-      await yieldToUI();  // 문장 사이 UI 양보
-    }catch(e){console.warn('preload skip:',e)}
+      updatePreloadTag(chIdx,item.pIdx,'done');
+      await yieldToUI();
+    }catch(e){
+      console.warn('preload skip:',e);
+      updatePreloadTag(chIdx,item.pIdx,'waiting');
+    }
   }
   preloading=false;
 }
@@ -377,6 +421,12 @@ function render(){
       h+='<div class="btn-row">';
       h+='<button class="listen-btn" onclick="speak('+i+','+j+',this)">▶ Listen</button>';
       h+='<button class="repeat-btn'+(isRepeat?' active':'')+'" onclick="toggleRepeat('+i+','+j+',this)">'+(isRepeat?'■ 반복중':'🔁 Repeat')+'</button>';
+      var plText=stripTags(pair[0]),plSel=getVoiceSelection(),plState='waiting',plLabel='⏳ 대기';
+      if(plSel.type==='kokoro'){
+        var spd=parseFloat(document.getElementById('speedSelect').value);
+        if(audioCache[cacheKey(plText,plSel.voice.voice,spd)]){plState='done';plLabel='✅ 준비됨'}
+      }
+      h+='<span class="preload-tag '+plState+'" id="pl'+i+'-'+j+'">'+plLabel+'</span>';
       h+='</div><div class="kr'+krHidden+'">'+pair[1]+'</div></div>';
     });
     return h+'</div>';
@@ -411,9 +461,9 @@ function speakLocal(text,voice,ci,pi,btn){
 }
 
 async function speakKokoro(text,voiceObj,ci,pi,btn){
-  btn.textContent='⏳ 준비중...';
   try{
     if(!kokoroReady){
+      btn.textContent='⏳ 준비중...';
       var ok=await initKokoroEngine();
       if(!ok){speakLocal(text,null,ci,pi,btn);return}
     }
@@ -421,7 +471,7 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
     var speed=parseFloat(document.getElementById('speedSelect').value);
     var key=cacheKey(text,voiceObj.voice,speed);
 
-    // Check cache first — instant playback
+    // Cache hit — instant playback, no WASM needed
     if(audioCache[key]){
       btn.textContent='🔊 재생중';
       var a=new Audio(audioCache[key]);
@@ -432,19 +482,30 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
       return;
     }
 
-    // Generate & cache
+    // Cache miss — pause preload, generate, then resume
+    var wasPreloading=preloading;
+    var savedQueue=preloadQueue?preloadQueue.slice():null;
+    var savedChapter=preloadChapterIdx;
+    if(wasPreloading) cancelPreload();
+    await yieldToUI();
+
+    btn.textContent='⏳ 생성중...';
     TTS.kokoroSettings.voiceName = voiceObj.voice;
     TTS.kokoroSettings.speed = speed;
 
-    // Try direct generate for caching
     if(TTS.kokoroTtsInstance&&TTS.kokoroTtsInstance.generate){
       var raw=await TTS.kokoroTtsInstance.generate(text);
       if(raw&&raw.audio){
         var blob=new Blob([raw.audio],{type:'audio/wav'});
         audioCache[key]=URL.createObjectURL(blob);
+        updatePreloadTag(ci,pi,'done');
         btn.textContent='🔊 재생중';
         var a2=new Audio(audioCache[key]);
-        a2.onended=function(){onSpeakEnd(ci,pi,btn)};
+        a2.onended=function(){
+          onSpeakEnd(ci,pi,btn);
+          // Resume preload after playback ends
+          if(wasPreloading&&savedChapter>=0) setTimeout(function(){preloadChapter(savedChapter)},200);
+        };
         a2.onerror=function(){resetBtn(btn)};
         TTS.audio=a2;
         a2.play();
@@ -461,6 +522,7 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
         handled = true;
         TTS.finishedAudio = origFinished;
         onSpeakEnd(ci,pi,btn);
+        if(wasPreloading&&savedChapter>=0) setTimeout(function(){preloadChapter(savedChapter)},200);
       }
     };
     await TTS.kokoroTTS(text);
