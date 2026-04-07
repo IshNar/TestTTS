@@ -61,14 +61,22 @@ h1{text-align:center;margin-bottom:8px;font-size:24px}
 <body>
 
 <h1>🔊 孫子兵法 TTS 음성 일괄 생성기</h1>
-<p class="subtitle">17개 음성 × 전체 문장 = 총 <span id="totalCount">0</span>개 파일 생성 → ZIP 다운로드</p>
+<p class="subtitle">17개 음성 × 전체 문장 = 총 <span id="totalCount">0</span>개 파일 생성 → 브라우저에 영구 저장</p>
 <p class="subtitle" style="color:#ef5350;margin-top:4px">⚠ <b>Google Chrome</b> 권장 (Whale/Edge는 호환 문제 발생 가능)</p>
 
 <div class="controls">
-  <button class="btn btn-start" id="btnStart" onclick="startGenerate()">▶ 생성 시작</button>
+  <button class="btn btn-start" id="btnStart" onclick="startGenerate()">▶ 생성 시작 (IndexedDB 저장)</button>
   <button class="btn btn-stop" id="btnStop" onclick="togglePause()" style="display:none">⏸ 일시정지</button>
   <button class="btn btn-stop" id="btnAbort" onclick="abortGenerate()" style="display:none;background:#888">■ 완전 중지</button>
-  <button class="btn btn-download" id="btnDownload" onclick="downloadZip()">📦 ZIP 다운로드</button>
+  <button class="btn btn-download" id="btnDownload" onclick="downloadZip()">📦 ZIP 백업 다운로드</button>
+</div>
+
+<div class="controls" style="margin-top:8px">
+  <label class="btn" style="background:#6a1b9a;padding:10px 24px;font-size:13px">
+    📁 ZIP 파일로 등록 (이전에 다운받은 ZIP)
+    <input type="file" accept=".zip" onchange="importZip(this)" style="display:none">
+  </label>
+  <span id="dbStatus" style="font-size:12px;color:#888;margin-left:8px"></span>
 </div>
 
 <div class="eta-box" id="etaBox"></div>
@@ -225,6 +233,92 @@ var totalPassages=0;
 chapters.forEach(function(c){totalPassages+=c.p.length});
 var totalFiles=kokoroVoices.length*totalPassages;
 document.getElementById('totalCount').textContent=totalFiles;
+
+// ===== IndexedDB helpers =====
+var DB_NAME='tts_audio_db', DB_STORE='audio', DB_VERSION=1;
+
+function openDB(){
+  return new Promise(function(resolve,reject){
+    var req=indexedDB.open(DB_NAME,DB_VERSION);
+    req.onupgradeneeded=function(e){
+      var db=e.target.result;
+      if(!db.objectStoreNames.contains(DB_STORE)){
+        db.createObjectStore(DB_STORE);
+      }
+    };
+    req.onsuccess=function(e){resolve(e.target.result)};
+    req.onerror=function(e){reject(e.target.error)};
+  });
+}
+
+function dbPut(db,key,value){
+  return new Promise(function(resolve,reject){
+    var tx=db.transaction(DB_STORE,'readwrite');
+    tx.objectStore(DB_STORE).put(value,key);
+    tx.oncomplete=function(){resolve()};
+    tx.onerror=function(e){reject(e.target.error)};
+  });
+}
+
+function dbCount(db){
+  return new Promise(function(resolve){
+    var tx=db.transaction(DB_STORE,'readonly');
+    var req=tx.objectStore(DB_STORE).count();
+    req.onsuccess=function(){resolve(req.result)};
+    req.onerror=function(){resolve(0)};
+  });
+}
+
+// Show current DB status
+async function showDBStatus(){
+  try{
+    var db=await openDB();
+    var count=await dbCount(db);
+    db.close();
+    document.getElementById('dbStatus').textContent='현재 IndexedDB: '+count+'개 음성 저장됨';
+  }catch(e){
+    document.getElementById('dbStatus').textContent='IndexedDB 접근 불가';
+  }
+}
+showDBStatus();
+
+// Import ZIP file into IndexedDB
+async function importZip(input){
+  if(!input.files||!input.files[0]) return;
+  var file=input.files[0];
+  log('ZIP 파일 로딩: '+file.name+' ('+Math.round(file.size/1024/1024)+'MB)','info');
+  document.getElementById('currentTask').innerHTML=
+    '<div class="label">📁 ZIP 등록 중</div><div class="text">파일 압축 해제 중...</div>';
+
+  try{
+    var zipData=await JSZip.loadAsync(file);
+    var entries=Object.keys(zipData.files).filter(function(f){return !zipData.files[f].dir});
+    var total=entries.length, done=0;
+    var db=await openDB();
+
+    for(var i=0;i<entries.length;i++){
+      var name=entries[i];
+      var buf=await zipData.files[name].async('arraybuffer');
+      await dbPut(db,name,buf);
+      done++;
+      if(done%10===0||done===total){
+        document.getElementById('currentTask').innerHTML=
+          '<div class="label">📁 ZIP → IndexedDB 등록 중</div>'+
+          '<div class="text">'+done+' / '+total+' ('+Math.round(done/total*100)+'%)</div>'+
+          '<div style="background:#0f3460;border-radius:6px;height:16px;margin-top:8px;overflow:hidden">'+
+          '<div style="height:100%;width:'+Math.round(done/total*100)+'%;background:linear-gradient(90deg,#6a1b9a,#ab47bc);border-radius:6px;transition:width 0.3s"></div></div>';
+      }
+    }
+    db.close();
+    log('ZIP 등록 완료! '+done+'개 파일 저장됨','ok');
+    document.getElementById('currentTask').innerHTML=
+      '<div class="label">완료!</div><div class="text">✅ '+done+'개 음성 파일이 IndexedDB에 저장되었습니다.</div>';
+    showDBStatus();
+  }catch(e){
+    log('ZIP 등록 실패: '+e.message,'err');
+  }
+  input.value='';
+}
 
 // ===== State =====
 var zip=null, stopped=false, paused=false, completed=0, failed=0;
@@ -420,6 +514,12 @@ async function startGenerate(){
   startTime=Date.now();
   zip=new JSZip();
 
+  // Open IndexedDB
+  var db;
+  try{db=await openDB()}catch(e){
+    log('IndexedDB 열기 실패: '+e.message,'err');return;
+  }
+
   // Init Kokoro
   var ok=await initKokoro();
   if(!ok){
@@ -427,6 +527,7 @@ async function startGenerate(){
     document.getElementById('btnStart').disabled=false;
     document.getElementById('btnStart').style.display='inline-block';
     document.getElementById('btnStop').style.display='none';
+    db.close();
     return;
   }
 
@@ -454,10 +555,13 @@ async function startGenerate(){
         if(src){
           try{
             var buf=await urlToArrayBuffer(src);
+            // Save to IndexedDB
+            await dbPut(db,fileName,buf);
+            // Also save to ZIP for backup download
             zip.file(fileName,buf);
             completed++;
             voiceDone++;
-            log('✓ '+fileName+' ('+Math.round(buf.byteLength/1024)+'KB)','ok');
+            log('✓ '+fileName+' ('+Math.round(buf.byteLength/1024)+'KB) → IndexedDB 저장','ok');
           }catch(e){
             failed++;
             log('✗ '+fileName+' 저장 실패: '+e.message,'err');
@@ -490,13 +594,15 @@ async function startGenerate(){
   }
 
   // Done
+  try{db.close()}catch(e){}
+  showDBStatus();
   document.getElementById('btnStop').style.display='none';
   document.getElementById('btnAbort').style.display='none';
   if(!stopped&&completed>0){
     document.getElementById('btnDownload').style.display='inline-block';
-    log('===== 생성 완료! 총 '+completed+'개 성공, '+failed+'개 실패 =====','ok');
+    log('===== 생성 완료! 총 '+completed+'개 IndexedDB 저장, '+failed+'개 실패 =====','ok');
     document.getElementById('currentTask').innerHTML=
-      '<div class="label">완료!</div><div class="text">✅ '+completed+'개 파일 생성 완료. ZIP 다운로드 버튼을 눌러주세요.</div>';
+      '<div class="label">완료!</div><div class="text">✅ '+completed+'개 음성이 브라우저에 저장되었습니다!<br>index.html에서 즉시 재생 가능합니다.<br><small style="color:#888">백업이 필요하면 ZIP 다운로드 버튼을 누르세요.</small></div>';
     document.getElementById('etaBox').textContent='총 소요 시간: '+Math.round((Date.now()-startTime)/1000)+'초';
   }else if(stopped){
     document.getElementById('btnStart').disabled=false;
