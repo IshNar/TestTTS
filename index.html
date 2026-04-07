@@ -414,57 +414,9 @@ function render(){
 function go(i){stopAll();current=i;render();window.scrollTo(0,0)}
 function goNav(d){go(current+d)}
 
-// ===== IndexedDB audio storage =====
-var IDB_NAME='tts_audio_db', IDB_STORE='audio', IDB_VER=1;
-var idb=null;
-
-function openIDB(){
-  if(idb) return Promise.resolve(idb);
-  return new Promise(function(resolve,reject){
-    var req=indexedDB.open(IDB_NAME,IDB_VER);
-    req.onupgradeneeded=function(e){
-      var db=e.target.result;
-      if(!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
-    };
-    req.onsuccess=function(e){idb=e.target.result;resolve(idb)};
-    req.onerror=function(e){reject(e.target.error)};
-  });
-}
-
-function idbGet(key){
-  return openIDB().then(function(db){
-    return new Promise(function(resolve){
-      var tx=db.transaction(IDB_STORE,'readonly');
-      var req=tx.objectStore(IDB_STORE).get(key);
-      req.onsuccess=function(){resolve(req.result||null)};
-      req.onerror=function(){resolve(null)};
-    });
-  }).catch(function(){return null});
-}
-
-function idbPut(key,value){
-  return openIDB().then(function(db){
-    return new Promise(function(resolve,reject){
-      var tx=db.transaction(IDB_STORE,'readwrite');
-      tx.objectStore(IDB_STORE).put(value,key);
-      tx.oncomplete=function(){resolve()};
-      tx.onerror=function(e){reject(e.target.error)};
-    });
-  });
-}
-
-// Pre-generated audio key
-function pregenKey(voiceName,chNum,pIdx){
-  return voiceName+'/ch'+chNum+'-'+(pIdx+1)+'.wav';
-}
-
-// Try to get audio from IndexedDB
-async function getPregenAudio(voiceName,chNum,pIdx){
-  var key=pregenKey(voiceName,chNum,pIdx);
-  var buf=await idbGet(key);
-  if(!buf) return null;
-  var blob=new Blob([buf],{type:'audio/wav'});
-  return URL.createObjectURL(blob);
+// ===== Pre-generated MP3 audio files =====
+function mp3Path(voiceName,chNum,pIdx){
+  return 'audio/'+voiceName+'/ch'+chNum+'-'+(pIdx+1)+'.mp3';
 }
 
 // ===== TTS =====
@@ -494,16 +446,16 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
   try{
     var speed=parseFloat(document.getElementById('speedSelect').value);
 
-    // 1st priority: IndexedDB pre-generated audio
-    var idbUrl=await getPregenAudio(voiceObj.voice,chapters[ci].num,pi);
-    if(idbUrl){
+    // 1st priority: pre-generated MP3 file
+    var mp3=mp3Path(voiceObj.voice,chapters[ci].num,pi);
+    var af=new Audio(mp3);
+    af.playbackRate=speed;
+    var playOk=await af.play().then(function(){return true}).catch(function(){return false});
+    if(playOk){
       btn.textContent='🔊 재생중';
-      var af=new Audio(idbUrl);
-      af.playbackRate=speed;
-      af.onended=function(){URL.revokeObjectURL(idbUrl);onSpeakEnd(ci,pi,btn)};
+      af.onended=function(){onSpeakEnd(ci,pi,btn)};
       af.onerror=function(){resetBtn(btn)};
       TTS.audio=af;
-      af.play();
       return;
     }
 
@@ -569,17 +521,10 @@ async function speakKokoro(text,voiceObj,ci,pi,btn){
     btn.textContent='⏳ 생성중...';
     TTS.kokoroSettings.voiceName = voiceObj.voice;
     TTS.kokoroSettings.speed = speed;
-    var idbKey2=pregenKey(voiceObj.voice,chapters[ci].num,pi);
     var origFinished=TTS.finishedAudio, handled=false;
     TTS.finishedAudio=function(e){
       if(!handled){handled=true;TTS.finishedAudio=origFinished;
-        if(TTS.audio&&TTS.audio.src){
-          audioCache[key]=TTS.audio.src;
-          // Also save to IndexedDB for future sessions
-          fetch(TTS.audio.src).then(function(r){return r.arrayBuffer()}).then(function(buf){
-            idbPut(idbKey2,buf).catch(function(){});
-          }).catch(function(){});
-        }
+        if(TTS.audio&&TTS.audio.src) audioCache[key]=TTS.audio.src;
         onSpeakEnd(ci,pi,btn);}
     };
     await TTS.kokoroTTS(text);
