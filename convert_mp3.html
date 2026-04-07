@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WAV → MP3 변환기</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',sans-serif;background:#1a1a2e;color:#eee;padding:20px;min-height:100vh}
+h1{text-align:center;margin-bottom:8px}
+.subtitle{text-align:center;color:#999;font-size:13px;margin-bottom:24px}
+.upload-area{max-width:600px;margin:0 auto 20px;padding:40px;border:2px dashed #555;border-radius:12px;text-align:center;cursor:pointer;transition:all .2s}
+.upload-area:hover{border-color:#42a5f5;background:#16213e}
+.upload-area input{display:none}
+.upload-area .icon{font-size:48px;margin-bottom:10px}
+.upload-area .text{font-size:15px;color:#aaa}
+.progress-box{max-width:600px;margin:0 auto 16px;background:#16213e;border-radius:12px;padding:20px;display:none}
+.progress-box h3{font-size:14px;color:#7ba0cc;margin-bottom:10px}
+.bar-wrap{background:#0f3460;border-radius:8px;height:28px;overflow:hidden;position:relative;margin-bottom:8px}
+.bar{height:100%;background:linear-gradient(90deg,#2e7d32,#43a047);border-radius:8px;transition:width 0.3s;width:0%}
+.bar-text{position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:bold;color:#fff}
+.stats{font-size:12px;color:#888;display:flex;justify-content:space-between}
+.current{max-width:600px;margin:0 auto 16px;background:#2a1a44;border:1px solid #5c3a8c;border-radius:8px;padding:12px;display:none;font-size:13px}
+.current .label{font-size:11px;color:#b39ddb;margin-bottom:4px}
+.log{max-width:600px;margin:0 auto;background:#111;border-radius:8px;padding:12px;max-height:200px;overflow-y:auto;font-family:monospace;font-size:11px;color:#aaa}
+.log .ok{color:#66bb6a}
+.log .err{color:#ef5350}
+.log .info{color:#42a5f5}
+.btn{padding:12px 32px;border:none;border-radius:8px;font-size:15px;font-weight:bold;cursor:pointer;margin:10px auto;display:none;background:#1565c0;color:#fff}
+.btn:hover{background:#1976d2}
+.controls{text-align:center}
+</style>
+</head>
+<body>
+
+<h1>🔄 WAV → MP3 변환기</h1>
+<p class="subtitle">기존에 다운받은 WAV ZIP을 MP3 ZIP으로 변환합니다 (용량 ~90% 감소)</p>
+
+<label class="upload-area" id="uploadArea">
+  <div class="icon">📁</div>
+  <div class="text">WAV ZIP 파일을 클릭하여 선택하세요</div>
+  <input type="file" accept=".zip" onchange="startConvert(this.files[0])">
+</label>
+
+<div class="progress-box" id="progressBox">
+  <h3>변환 진행률</h3>
+  <div class="bar-wrap">
+    <div class="bar" id="bar"></div>
+    <div class="bar-text" id="barText">0 / 0</div>
+  </div>
+  <div class="stats">
+    <span id="statDone">완료: 0</span>
+    <span id="statSize">원본: 0MB → MP3: 0MB</span>
+    <span id="statETA">남은: -</span>
+  </div>
+</div>
+
+<div class="current" id="current">
+  <div class="label">변환 중</div>
+  <div id="currentFile">-</div>
+</div>
+
+<div class="controls">
+  <button class="btn" id="btnDownload" onclick="downloadResult()">📦 MP3 ZIP 다운로드</button>
+</div>
+
+<div class="log" id="log"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
+
+<script>
+var resultZip=null;
+
+function log(msg,cls){
+  var el=document.getElementById('log');
+  var d=document.createElement('div');
+  if(cls)d.className=cls;
+  d.textContent='['+new Date().toLocaleTimeString()+'] '+msg;
+  el.appendChild(d);
+  el.scrollTop=el.scrollHeight;
+}
+
+function readWavHeader(buf){
+  var view=new DataView(buf);
+  // Find 'fmt ' chunk
+  var offset=12;
+  while(offset<buf.byteLength-8){
+    var id=String.fromCharCode(view.getUint8(offset),view.getUint8(offset+1),view.getUint8(offset+2),view.getUint8(offset+3));
+    var size=view.getUint32(offset+4,true);
+    if(id==='fmt '){
+      return {
+        audioFormat:view.getUint16(offset+8,true),
+        channels:view.getUint16(offset+10,true),
+        sampleRate:view.getUint32(offset+12,true),
+        bitsPerSample:view.getUint16(offset+22,true)
+      };
+    }
+    offset+=8+size;
+  }
+  return null;
+}
+
+function findDataChunk(buf){
+  var view=new DataView(buf);
+  var offset=12;
+  while(offset<buf.byteLength-8){
+    var id=String.fromCharCode(view.getUint8(offset),view.getUint8(offset+1),view.getUint8(offset+2),view.getUint8(offset+3));
+    var size=view.getUint32(offset+4,true);
+    if(id==='data'){
+      return {offset:offset+8, size:size};
+    }
+    offset+=8+size;
+  }
+  return null;
+}
+
+function wavToMp3(wavBuf){
+  var fmt=readWavHeader(wavBuf);
+  if(!fmt){throw new Error('Invalid WAV header')}
+
+  var data=findDataChunk(wavBuf);
+  if(!data){throw new Error('No data chunk')}
+
+  var channels=fmt.channels;
+  var sampleRate=fmt.sampleRate;
+  var bps=fmt.bitsPerSample;
+
+  // Extract PCM samples
+  var view=new DataView(wavBuf);
+  var numSamples=data.size/(bps/8)/channels;
+
+  var mp3encoder=new lamejs.Mp3Encoder(channels,sampleRate,128);
+  var mp3Data=[];
+  var blockSize=1152;
+
+  if(channels===1){
+    var samples=new Int16Array(numSamples);
+    for(var i=0;i<numSamples;i++){
+      if(bps===16){
+        samples[i]=view.getInt16(data.offset+i*2,true);
+      }else if(bps===32){
+        // Float32
+        var f=view.getFloat32(data.offset+i*4,true);
+        samples[i]=Math.max(-32768,Math.min(32767,Math.round(f*32767)));
+      }
+    }
+    for(var i=0;i<samples.length;i+=blockSize){
+      var chunk=samples.subarray(i,i+blockSize);
+      var mp3buf=mp3encoder.encodeBuffer(chunk);
+      if(mp3buf.length>0) mp3Data.push(mp3buf);
+    }
+  }else{
+    var left=new Int16Array(numSamples);
+    var right=new Int16Array(numSamples);
+    for(var i=0;i<numSamples;i++){
+      if(bps===16){
+        left[i]=view.getInt16(data.offset+i*4,true);
+        right[i]=view.getInt16(data.offset+i*4+2,true);
+      }else if(bps===32){
+        var fl=view.getFloat32(data.offset+i*8,true);
+        var fr=view.getFloat32(data.offset+i*8+4,true);
+        left[i]=Math.max(-32768,Math.min(32767,Math.round(fl*32767)));
+        right[i]=Math.max(-32768,Math.min(32767,Math.round(fr*32767)));
+      }
+    }
+    for(var i=0;i<left.length;i+=blockSize){
+      var lc=left.subarray(i,i+blockSize);
+      var rc=right.subarray(i,i+blockSize);
+      var mp3buf=mp3encoder.encodeBuffer(lc,rc);
+      if(mp3buf.length>0) mp3Data.push(mp3buf);
+    }
+  }
+
+  var end=mp3encoder.flush();
+  if(end.length>0) mp3Data.push(end);
+
+  // Merge
+  var totalLen=0;
+  mp3Data.forEach(function(b){totalLen+=b.length});
+  var result=new Uint8Array(totalLen);
+  var off=0;
+  mp3Data.forEach(function(b){result.set(b,off);off+=b.length});
+  return result;
+}
+
+async function startConvert(file){
+  if(!file) return;
+  document.getElementById('uploadArea').style.display='none';
+  document.getElementById('progressBox').style.display='block';
+  document.getElementById('current').style.display='block';
+
+  log('ZIP 로딩: '+file.name+' ('+Math.round(file.size/1024/1024)+'MB)','info');
+
+  var zipData=await JSZip.loadAsync(file);
+  var wavFiles=Object.keys(zipData.files).filter(function(f){
+    return !zipData.files[f].dir && f.toLowerCase().endsWith('.wav');
+  });
+
+  log('WAV 파일 '+wavFiles.length+'개 발견','info');
+
+  resultZip=new JSZip();
+  var total=wavFiles.length, done=0, totalWavSize=0, totalMp3Size=0;
+  var startTime=Date.now();
+
+  for(var i=0;i<wavFiles.length;i++){
+    var name=wavFiles[i];
+    var mp3Name=name.replace(/\.wav$/i,'.mp3');
+    document.getElementById('currentFile').textContent=name+' → '+mp3Name;
+
+    try{
+      var wavBuf=await zipData.files[name].async('arraybuffer');
+      totalWavSize+=wavBuf.byteLength;
+
+      var mp3Buf=wavToMp3(wavBuf);
+      totalMp3Size+=mp3Buf.length;
+
+      resultZip.file(mp3Name,mp3Buf);
+      done++;
+
+      if(done%10===0||done===total){
+        log('✓ '+mp3Name+' (WAV '+Math.round(wavBuf.byteLength/1024)+'KB → MP3 '+Math.round(mp3Buf.length/1024)+'KB, '+Math.round((1-mp3Buf.length/wavBuf.byteLength)*100)+'% 감소)','ok');
+      }
+    }catch(e){
+      log('✗ '+name+' 변환 실패: '+e.message,'err');
+      done++;
+    }
+
+    // Update UI
+    var pct=Math.round(done/total*100);
+    document.getElementById('bar').style.width=pct+'%';
+    document.getElementById('barText').textContent=done+' / '+total+' ('+pct+'%)';
+    document.getElementById('statDone').textContent='완료: '+done;
+    document.getElementById('statSize').textContent=
+      '원본: '+Math.round(totalWavSize/1024/1024)+'MB → MP3: '+Math.round(totalMp3Size/1024/1024)+'MB';
+
+    if(done>0&&done<total){
+      var elapsed=(Date.now()-startTime)/1000;
+      var remaining=Math.round((total-done)*(elapsed/done));
+      document.getElementById('statETA').textContent='남은: '+Math.floor(remaining/60)+'분 '+remaining%60+'초';
+    }
+
+    // Yield to UI
+    await new Promise(function(r){setTimeout(r,10)});
+  }
+
+  log('===== 변환 완료! =====','ok');
+  log('원본: '+Math.round(totalWavSize/1024/1024)+'MB → MP3: '+Math.round(totalMp3Size/1024/1024)+'MB ('+Math.round((1-totalMp3Size/totalWavSize)*100)+'% 감소)','ok');
+  document.getElementById('statETA').textContent='완료!';
+  document.getElementById('current').innerHTML='<div class="label">완료!</div><div>✅ '+done+'개 파일 변환 완료. 다운로드 버튼을 눌러주세요.</div>';
+  document.getElementById('btnDownload').style.display='inline-block';
+}
+
+async function downloadResult(){
+  document.getElementById('btnDownload').textContent='⏳ 압축중...';
+  document.getElementById('btnDownload').disabled=true;
+  try{
+    var blob=await resultZip.generateAsync({type:'blob'},function(meta){
+      document.getElementById('btnDownload').textContent='⏳ 압축중... '+Math.round(meta.percent)+'%';
+    });
+    var url=URL.createObjectURL(blob);
+    var a=document.createElement('a');
+    a.href=url;
+    a.download='tts_audio_mp3.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    log('다운로드 시작!','ok');
+  }catch(e){
+    log('ZIP 생성 오류: '+e.message,'err');
+  }
+  document.getElementById('btnDownload').textContent='📦 MP3 ZIP 다운로드';
+  document.getElementById('btnDownload').disabled=false;
+}
+</script>
+</body>
+</html>
